@@ -8,6 +8,8 @@ def run(args):
     print(args.inputtext)
 
 def main():
+    """Parses arguments and applies import script to the raw text file."""
+
     # Instantiate parser
     parser = argparse.ArgumentParser(description="Convert raw output from the Notebook MMF database into well-formed MySQL.")
     
