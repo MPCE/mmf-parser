@@ -3,10 +3,17 @@
 # Author: Michael Falk
 
 import argparse
+from mmfparse.core import mmfParser
 
 def run(inputtext, username, password, host, dbname, encoding):
     """Routine for importing data."""
-    print(inputtext)
+    usr_choice = input("Initialise parser? Please type 'yes' or 'no'...\n")
+    if usr_choice == "yes":
+        parser = mmfParser(username, password, host, dbname, encoding)
+    elif usr_choice =="no":
+        print("Nothing was done.")
+    else:
+        run(inputtext, username, password, host, dbname, encoding)
 
 def main():
     """Parses arguments and applies import script to the raw text file."""
@@ -22,7 +29,7 @@ def main():
     parser.add_argument("-p", "--password", help="Your password for the database")
     parser.add_argument("-hst", "--host", default="127.0.0.1", help="The IP address of the database. Defaults to localhost.")
 
-    # Parse arguments and pass to processing function
+    # Parse arguments and convert to dict
     args = vars(parser.parse_args())
     
     # Pass to function
