@@ -7,13 +7,13 @@ from mmfparse.core import mmfParser
 
 def run(inputtext, username, password, host, dbname, encoding):
     """Routine for importing data."""
-    usr_choice = input("Initialise parser? Please type 'yes' or 'no'...\n")
-    if usr_choice == "yes":
-        parser = mmfParser(username, password, host, dbname, encoding)
-    elif usr_choice =="no":
-        print("Nothing was done.")
-    else:
-        run(inputtext, username, password, host, dbname, encoding)
+
+    # Initialise parser
+    parser = mmfParser(username, password, host, dbname, encoding)
+
+    # Create database
+    parser.create_tables()
+
 
 def main():
     """Parses arguments and applies import script to the raw text file."""

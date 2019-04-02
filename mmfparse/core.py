@@ -19,7 +19,7 @@ class mmfParser(object):
 
     # Constant: field codes of the original MMF database
     FIELD_CODES = {
-        '0':'indenfitifer_other',
+        '0':'identifier_other',
         '1':'identifier',
         '01':'edition_identifier',
         '20':'edition_counter',
@@ -71,14 +71,14 @@ class mmfParser(object):
         "i~":"ï",
         "o~":"ö",
         "u~":"ü",
-        "\\":"ç",
+        "\\": "ç",  # One backslash represents a ç
         "O|":"Où",
         "o|":"où",
         "o+e":"œ",
         "O+E":"Œ",
-        r"/.../":"[...]",
-        r"/sic/":"[sic]",
-        r"/sic==/":"[sic]",
+        "/.../":"[...]",
+        "/sic/":"[sic]",
+        "/sic==/":"[sic]",
         "/==":"[",
         "==/":"]",
         "/_":"[",
@@ -90,11 +90,87 @@ class mmfParser(object):
         ". .":".."
     }
 
+    # Constant: sql schema of MMF database
+    SCHEMA = {
+        # Each 'princeps' is represented by a work
+        'mmf_work': """
+        CREATE TABLE IF NOT EXISTS mmf_work (
+            work_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            uuid CHAR(36) NOT NULL,
+            identifier VARCHAR(255),
+            translation VARCHAR(128),
+            title TEXT,
+            comments TEXT,
+            bur_references TEXT,
+            bur_comments TEXT,
+            original_title TEXT,
+            translation_comments TEXT,
+            description TEXT,
+            INDEX(identifier)
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Each 're-edition' is represented by an edition
+        'mmf_edition': """
+        CREATE TABLE IF NOT EXISTS mmf_edition (
+            edition_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            work_id INT NOT NULL,
+            uuid CHAR(36) NOT NULL,
+            identifier VARCHAR(255),
+            translation VARCHAR(128),
+            author VARCHAR(255),
+            translator VARCHAR(255),
+            short_title VARCHAR(255),
+            long_title TEXT,
+            collection_title TEXT,
+            publication_details TEXT,
+            comments TEXT,
+            INDEX(identifier)
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Each library copy is represented by a holding
+        'mmf_holding': """
+        CREATE TABLE IF NOT EXISTS mmf_holding (
+            holding_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            edition_id INT NOT NULL,
+            lib_id INT NOT NULL
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Each library is represented by a library
+        'mmf_lib': """
+        CREATE TABLE IF NOT EXISTS mmf_lib (
+            lib_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            short_name VARCHAR(255),
+            full_name TEXT
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Each reference is respresented as a reference
+        'mmf_ref': """
+        CREATE TABLE IF NOT EXISTS mmf_ref (
+            ref_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            short_name VARCHAR(255),
+            bibliographic_reference TEXT,
+            ref_type INT NOT NULL,
+            page_num INT
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Each reference is of one of two types
+        'mmf_ref_type': """
+        CREATE TABLE IF NOT EXISTS mmf_ref_type (
+            ref_type_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255)
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """
+    }
+
     def __init__(self, username, password, host, dbname, encoding):
         
-        # Set encoding of input text file
+        # Store arguments
+        self.username = username
+        self.password = password
+        self.host = host
+        self.dbname = dbname
         self.encoding = encoding
-    
+
         # Connect to MySQL database
         self.conn = mysql.connector.connect(
             user=username,
@@ -108,78 +184,48 @@ class mmfParser(object):
 
     def create_tables(self):
         """Creates essential tables for the MMF database."""
-
-        # SQL for table creation:
-        work_tbl_stmt = """
-        CREATE TABLE IF NOT EXISTS mmf_work (
-            id INT NOT NULL AUTO_INCREMENT,
-            uuid CHAR(36) NOT NULL,
-            identifier VARCHAR(255),
-            translation VARCHAR(128),
-
-            PRIMARY KEY(id)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8;
-        """
-
-        ed_tbl_stmt = """
-        CREATE TABLE IF NOT EXISTS mmf_edition (
-            id INT NOT NULL AUTO_INCREMENT,
-            uuid CHAR(36) NOT NULL,
-            identifier VARCHAR(255),
-            translation VARCHAR(128)
-            PRIMARY KEY(id)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8;
-        """
         
-        # Create tables if they do not exist
-        self.cur = self.conn.cursor()
-        self.cur.execute("""
-        CREATE TABLE IF NOT EXISTS `mmf_work` (
-            `ID` int(25) NOT NULL AUTO_INCREMENT,
-            `Identifier_Other` text,
-            `Identifier` text,
-            `Identifier_Edition` text,
-            `Edition_Counter` text,
-            `Translation` text,
-            `Translation_Edition` text,
-            `Author` text,
-            `Author_Edition` text,
-            `Translator` text,
-            `Translator_Edition` text,
-            `Title` text,
-            `Edition_Short_Title` text,
-            `Edition_Long_Title` text,
-            `Edition_Collection_Title` text,
-            `Publication_Details` text,
-            `Edition_Publication_Details` text,
-            `Location` text,
-            `References_Contemporary` text,
-            `References_Post_18C` text,
-            `Edition_Location` text,
-            `Comments` text,
-            `Edition_Comments` text,
-            `References_BUR` text,
-            `Comments_BUR` text,
-            `Original_Title` text,
-            `Comments_Translation` text,
-            `Description` text,
-            `Princeps_Entry` text,
-            `End_Re_Edition_Entry` text,
-            `Re_Editions` text,
-            `Final_Comments` text,
-            `End_Full_Entry` text,
-            `First_Text` text,
-            `UUID` text,
-            `FBTEE_Author_Code` text,
-            PRIMARY KEY (`ID`)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8;
-        """)
-        print('Table mmf_raw created in database.')
-        return None
+        # Do any of the tables exist?
+        cur = self.conn.cursor()
+        cur.execute('SHOW TABLES')
+        table_list = cur.fetchall()
+        table_list = [tbl for (tbl,) in table_list if tbl in self.SCHEMA.keys()]
+
+        # Inner function for creating table
+        def _apply_schema():
+            for table, stmt in self.SCHEMA.items():
+                cur.execute('DROP TABLE IF EXISTS %s' % table) # Can't use params because it wraps strings in quotation marks
+                cur.execute(stmt)
+                self.conn.commit()
+                print(f'Table {table} created in database {self.dbname}.')
+
+        # Allow user input, apply the schema
+        if len(table_list) > 0:
+            print(f'Tables {", ".join(table_list)} already exist.')
+            usr_choice = input('Overwrite? y/n\n')
+            if usr_choice.startswith('y'):
+                confirmation = input('This will overwrite existing tables, are you sure? y/n\n')
+                if confirmation.startswith('y'):
+                    _apply_schema()
+                    cur.close()
+                else:
+                    print('Overwrite not confrimed. Table creation skipped.')
+                    cur.close()
+                    return False
+            else:
+                print('Table creation skipped.')
+                cur.close()
+                return False
+        else:
+            _apply_schema()
+            cur.close()
+
+        return True
 
     def import_text(self):
         """Imports text from a Notebook output file into the MMF database."""
 
+        
 
 
         return None
