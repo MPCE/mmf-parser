@@ -222,10 +222,19 @@ class mmfParser(object):
 
         return True
 
-    def import_text(self):
+    def import_text(self, inputtext):
         """Imports text from a Notebook output file into the MMF database."""
 
-        
+        # Read the text file into memory
+        with open(inputtext, 'r', encoding=self.encoding, errors='ignore') as f:
+            # There are some non-ASCII characters that have crept in to notes
+            # copied and pasted from the web, so errors must be set to 'ignore'
+            text = f.read()
 
+        # Process using ASCII table
+        for old, new in self.ASCII_CODES.items():
+            text = text.replace(old, new)
+        
+        
 
         return None

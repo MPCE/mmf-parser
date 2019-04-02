@@ -14,6 +14,9 @@ def run(inputtext, username, password, host, dbname, encoding):
     # Create database
     parser.create_tables()
 
+    # Import text
+    parser.import_text(inputtext)
+
 
 def main():
     """Parses arguments and applies import script to the raw text file."""
