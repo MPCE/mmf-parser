@@ -2,8 +2,9 @@ import mysql.connector
 from uuid import uuid4
 import re
 from tqdm import tqdm
+from datetime import date
 
-from .util import DupeDict, ListDict
+from .util import DupeDict
 
 class mmfParser(object):
     """Main class for parsing MMF output files.
@@ -170,6 +171,15 @@ class mmfParser(object):
             ref_type_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             name VARCHAR(255)
         ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        """,
+        # Table for recording errors
+        'mmf_error': """
+        CREATE TABLE IF NOT EXISTS mmf_error (
+            error_id INT AUTO_INCREMENT PRIMARY KEY,
+            filename VARCHAR(255),
+            text TEXT,
+            date DATE
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
         """
     }
 
@@ -261,8 +271,6 @@ class mmfParser(object):
         # Regex for removing null entries
         ne = re.compile(r'^<\d{1,2}>$|^\s+$')
 
-        # A different regex: for splitting title
-
         # Now iterate over the list and extract key information
 
         # Initialise a cursor and define input sql
@@ -286,27 +294,26 @@ class mmfParser(object):
         insert_holdings = """
         INSERT INTO mmf_holding VALUES (NULL, %s, %s, NULL)
         """
-        # Accumulators
-        record_list = []
-        error_list = []
+        insert_error = """
+        INSERT INTO mmf_error VALUES (NULL, %s, %s, %s)
+        """
+
         print("Processing records...")
+        successes = 0
+        errors = 0
         for record in tqdm(text):
-            
-            out = {}
 
             # Extract record into dict
-            record = nl.sub(" ", record) # newlines
-            record = ds.sub("", record) # dollarsigns
-            record = DupeDict(kv.findall(record)) # information
+            record = nl.sub(" ", record)  # newlines
+            record = ds.sub("", record)  # dollarsigns
+            record = DupeDict(kv.findall(record))  # information
             record = {k:v for k,v in record.items() if not ne.match(v)} # null entries
-            
-            out['record'] = record
 
             # Insert into database
 
-            # Is this a work or a re-edition?
-            # Field 21 is the title field for editions:
-            if '21' in record and len(record['21']) > 0:
+            # Is this a princeps or a re-edition?
+            # Editions are distinguished by their 'edition_counter'
+            if '01' and '011' in record or '01' and '20' in record:
                 # Create new dict for the edition
                 ed = {}.fromkeys(self.EDITION_CODES.values())
 
@@ -319,7 +326,7 @@ class mmfParser(object):
                 for code, field in self.EDITION_CODES.items():
                     if code in record:
                         ed[field] = record[code]
-                
+
                 # Concatenate two halves of title
                 if ed['long_title'] is not None:
                     ed['long_title'] = ed['short_title'] + ed['long_title']
@@ -331,8 +338,6 @@ class mmfParser(object):
                 # Get new primary key
                 self.cur.execute("SELECT LAST_INSERT_ID()")
                 edition_id = self.cur.fetchone()[0]
-
-                out['ed'] = ed
 
                 # Explode holdings and insert them
                 if ed['holdings'] is not None:
@@ -347,8 +352,8 @@ class mmfParser(object):
                     # Insert them
                     self.cur.executemany(insert_holdings, param_seq)
                     self.conn.commit()
-
-                    out['holdings'] = param_seq
+                
+                successes += 1
 
             # Titles of works are stored in field five
             elif '5' in record and len(record['5']) > 0:
@@ -396,10 +401,6 @@ class mmfParser(object):
                 self.cur.execute('SELECT LAST_INSERT_ID()')
                 edition_id = self.cur.fetchone()[0]
 
-                # Logging: store dicts
-                out['wk'] = wk
-                out['ed'] = ed
-
                 # Explode holdings and insert them
                 # NB: above, holdings are seperated by commas, here by spaces
                 if ed['holdings'] is not None:
@@ -415,17 +416,41 @@ class mmfParser(object):
                     self.cur.executemany(insert_holdings, param_seq)
                     self.conn.commit()
 
-                    out['holdings'] = param_seq
+                successes += 1
 
             else:
-                error_list.append({'record':record, 'error':'neither work nor edition'})
-
-            record_list.append(out)
+                self.cur.execute(insert_error, (inputtext, str(record), date.today()))
+                self.conn.commit()
+                errors += 1
 
         # Close the cursor
         self.cur.close()
 
-        print(f'Database update complete. {len(record_list)} records processed, with {len(error_list)} errors.')
+        print(f'Database update complete. {successes} records inserted, with {errors} errors.')
 
-        return record_list, error_list
+        return None
+
+    def link_books(self):
+        """Attempts to link related records across the database.
+        
+        In principle, every mmf_edition should have an mmf_work corresponding
+        to it. The aim of the 'identifier' field in the original database
+        was to enable such cross-referencing."""
+
+        # SQL query
+        link_book_stmt = """
+        UPDATE mmf_edition AS e
+        LEFT JOIN mmf_work AS w ON e.identifier = w.identifier
+        SET e.work_id = w.work_id
+        WHERE e.work_id IS NULL
+        """
+
+        # Open cursor
+        self.cur = self.conn.cursor()
+        print("Linking editions to works...")
+        self.cur.execute(link_book_stmt)
+        num_affected = self.cur.rowcount
+        self.conn.commit()
+        print(f'{num_affected} links created.')
+        self.cur.close()
 

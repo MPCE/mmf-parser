@@ -16,11 +16,10 @@ def run(inputtext, username, password, host, dbname, encoding):
     parser.create_tables()
 
     # Import text
-    record_list, error_list = parser.import_records(inputtext)
+    parser.import_records(inputtext)
 
-    # Dump the record_list
-    with open("results.pickle", "wb") as f:
-        p.dump({'records':record_list, 'errors':error_list}, f)
+    # Find links in data
+    parser.link_books()
 
 
 def main():
