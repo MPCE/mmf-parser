@@ -4,6 +4,7 @@
 
 import argparse
 from mmfparse.core import mmfParser
+import pickle as p
 
 def run(inputtext, username, password, host, dbname, encoding):
     """Routine for importing data."""
@@ -15,7 +16,11 @@ def run(inputtext, username, password, host, dbname, encoding):
     parser.create_tables()
 
     # Import text
-    parser.import_text(inputtext)
+    record_list = parser.import_records(inputtext)
+
+    # Dump the record_list
+    with open("record_list.pickle", "wb") as f:
+        p.dump(record_list, f)
 
 
 def main():

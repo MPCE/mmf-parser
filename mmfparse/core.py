@@ -1,5 +1,8 @@
 import mysql.connector
 from uuid import uuid4
+import re
+
+from .util import DupeDict, ListDict
 
 class mmfParser(object):
     """Main class for parsing MMF output files.
@@ -18,41 +21,43 @@ class mmfParser(object):
     """
 
     # Constant: field codes of the original MMF database
-    FIELD_CODES = {
-        '0':'identifier_other',
-        '1':'identifier',
-        '01':'edition_identifier',
+    EDITION_CODES = {
+        '01':'identifier',
+        '011':'edition_counter', # This is complicated. See below how the DupeDict is used
         '20':'edition_counter',
-        '4':'translation',
-        '04':'edition_translation',
-        '2':'author',
-        '02':'edition_author',
-        '3':'translator',
-        '03':'edition_translator',
-        '5':'title',
-        '21':'edition_short_title',
-        '22':'edition_long_title',
-        '23':'edition_collection_title',
-        '6':'publication_details',
-        '24':'edition_publication_details',
-        '7':'location',
-        '8':'contemporary_references',
-        '9':'later_references',
-        '25':'edition_location',
-        '10':'comments',
-        '26':'edition_comments',
-        '11':'references_BUR',
-        '12':'comments_BUR',
-        '13':'original_title',
-        '14':'translation_comments',
-        '15':'description',
-        '16':'princeps_entry',
-        '27':'end_re_edition_entry',
-        '18':'re_editions',
+        '04':'translation',
+        '02':'author',
+        '03':'translator',
+        '21':'short_title', # Actually the start of the title
+        '22':'long_title', # Actually the rest of the title
+        '23':'collection_title',
+        '24':'publication_details',
+        '25':'holdings',
+        '26':'comments',
         '19':'final_comments',
-        '17':'end_full_entry',
         '30':'first_text',
         'Incipit':'first_text'
+    }
+    WORK_CODES = {
+        '01': 'identifier',
+        '4': 'translation',
+        '2': 'author',
+        '3': 'translator',
+        '5': 'title',
+        '6': 'publication_details',
+        '7': 'holdings',
+        '8': 'contemporary_references',
+        '9': 'later_references',
+        '10': 'comments',
+        '11': 'bur_references',
+        '12': 'bur_comments',
+        '13': 'original_title',
+        '14': 'translation_comments',
+        '15': 'description',
+        '18': 're_editions',
+        '19': 'final_comments',
+        '30': 'first_text',
+        'Incipit': 'first_text'
     }
 
     # Constant: ASCII codes from original MMF markup
@@ -86,11 +91,10 @@ class mmfParser(object):
         "Z2":"",
         "Z3":"",
         "`":"'",
-        "\"":"'",
-        ". .":".."
+        "\"":"'"
     }
 
-    # Constant: sql schema of MMF database
+    # Constant: sql schema of new MMF database
     SCHEMA = {
         # Each 'princeps' is represented by a work
         'mmf_work': """
@@ -113,9 +117,10 @@ class mmfParser(object):
         'mmf_edition': """
         CREATE TABLE IF NOT EXISTS mmf_edition (
             edition_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            work_id INT NOT NULL,
+            work_id INT,
             uuid CHAR(36) NOT NULL,
             identifier VARCHAR(255),
+            edition_counter CHAR(7),
             translation VARCHAR(128),
             author VARCHAR(255),
             translator VARCHAR(255),
@@ -124,6 +129,8 @@ class mmfParser(object):
             collection_title TEXT,
             publication_details TEXT,
             comments TEXT,
+            final_comments TEXT,
+            first_text TEXT,
             INDEX(identifier)
         ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
         """,
@@ -132,7 +139,10 @@ class mmfParser(object):
         CREATE TABLE IF NOT EXISTS mmf_holding (
             holding_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             edition_id INT NOT NULL,
-            lib_id INT NOT NULL
+            lib_name VARCHAR(255),
+            lib_id INT,
+            INDEX(edition_id),
+            INDEX(lib_id)
         ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
         """,
         # Each library is represented by a library
@@ -209,7 +219,7 @@ class mmfParser(object):
                     _apply_schema()
                     cur.close()
                 else:
-                    print('Overwrite not confrimed. Table creation skipped.')
+                    print('Overwrite not confirmed. Table creation skipped.')
                     cur.close()
                     return False
             else:
@@ -222,8 +232,8 @@ class mmfParser(object):
 
         return True
 
-    def import_text(self, inputtext):
-        """Imports text from a Notebook output file into the MMF database."""
+    def import_records(self, inputtext):
+        """Imports records from a Notebook output file into the MMF database."""
 
         # Read the text file into memory
         with open(inputtext, 'r', encoding=self.encoding, errors='ignore') as f:
@@ -235,6 +245,127 @@ class mmfParser(object):
         for old, new in self.ASCII_CODES.items():
             text = text.replace(old, new)
         
+        # Split
+        text = text.split("\n%End:\n")
         
+        # Define regexes for processing each record as a string.
+        # Each regex relies on the prior application of the one before.
 
-        return None
+        # Regex for stripping out extraneous newlines
+        nl = re.compile(r'\n(?!%)')
+        # Regex for stripping out extraneous dollar signs
+        ds = re.compile(r'\$(?=\n|$)')
+        # Regex for pulling out keys and values
+        kv = re.compile(r'<?(\d{1,2}|Incipit)>?:(.+?)\s*(?:\n|$)')
+        # Regex for removing null entries
+        ne = re.compile(r'^<\d{1,2}>$|^\s+$')
+
+        # Now iterate over the list and extract key information
+
+        # Initialise a cursor and define input sql
+        self.cur = self.conn.cursor()
+        insert_work = """
+        INSERT INTO mmf_work VALUES ('',
+            %(uuid)s, %(identifier)s, %(translation)s,
+            %(title)s, %(comments)s, %(bur_references)s, %(bur_comments)s,
+            %(original_title)s, %(translation_comments)s,
+            %(description)s 
+        )
+        """
+        insert_edition = """
+        INSERT INTO mmf_edition VALUES (%(edition_id)s, %(work_id)s,
+            %(uuid)s, %(identifier)s, %(edition_counter)s, %(translation)s,
+            %(author)s, %(translator)s, %(short_title)s, %(long_title)s,
+            %(collection_title)s, %(publication_details)s,
+            %(comments)s, %(final_comments)s, %(first_text)s
+        )
+        """
+        insert_holdings = """
+        INSERT INTO mmf_holding VALUES (NULL, %s, %s, NULL)
+        """
+        # Accumulators
+        record_list = []
+        error_list = []
+        for record in text:
+            
+            out = {}
+
+            # Extract record into dict
+            record = nl.sub(" ", record) # newlines
+            record = ds.sub("", record) # dollarsigns
+            record = DupeDict(kv.findall(record)) # information
+            record = {k:v for k,v in record.items() if not ne.match(v)} # null entries
+            
+            out['record'] = record
+
+            # Insert into database
+
+            # Is this a work or a re-edition?
+            # Field 21 is the title field for editions:
+            if '21' in record and len(record['21']) > 0:
+                # Create new dict for the edition
+                ed = {
+                    'edition_id':None,
+                    'work_id':None,
+                    'uuid':str(uuid4())
+                    }
+                # Loop through the field definitions for editions,
+                # and extract the key information
+                for code,field in self.EDITION_CODES.items():
+                    if code in record:
+                        ed[field] = record[code]
+                    else:
+                        ed[field] = None
+                # Concatenate two halves of title
+                if ed['long_title'] is not None:
+                    ed['long_title'] = ed['short_title'] + ed['long_title']
+
+                # Insert into DB
+                self.cur.execute(insert_edition, ed)
+
+                # Get new primary key
+                self.cur.execute("SELECT LAST_INSERT_ID()")
+                edition_id = self.cur.fetchone()[0]
+
+                # Commit changes to db
+                self.conn.commit()
+
+                out['ed'] = ed
+
+                # Explode holdings and insert them
+                if ed['holdings'] is not None:
+                    # Explode the list of holdings
+                    holdings = ed['holdings'].split(',')
+                    # Check to see if split worked, if not, split on two spaces:
+                    if len(holdings) == 1:
+                        holdings = holdings[0].split('  ')
+                    # Create sequence of params for insert
+                    # Trim any whitespace from the library names as we go
+                    param_seq = [(edition_id, lib.strip()) for lib in holdings]
+                    # Insert them
+                    self.cur.executemany(insert_holdings, param_seq)
+
+                    out['holdings'] = param_seq
+
+            # Titles of works are stored in field five
+            elif '5' in record and len(record['5'] > 0):
+                # Works in MMF2 need to be split into works and editions
+                wk = {'work_id': None, 'uuid': str(uuid4())}
+                ed = {'edition_id': None, 'uuid': str(uuid4())}
+
+                # First insert the work:
+                
+
+
+
+
+            else:
+                error_list.append({'record':record, 'error':'neither work nor edition'})
+
+            record_list.append(out)
+
+        # Close the cursor
+        self.cur.close()
+
+        return record_list, error_list
+

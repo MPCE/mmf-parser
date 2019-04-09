@@ -1,4 +1,4 @@
 name = "mmfparse"
 
-# Make the key class available from top level
+# Make the key classes available from top level
 from mmfparse.core import mmfParser
