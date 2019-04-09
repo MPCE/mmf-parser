@@ -16,11 +16,11 @@ def run(inputtext, username, password, host, dbname, encoding):
     parser.create_tables()
 
     # Import text
-    record_list = parser.import_records(inputtext)
+    record_list, error_list = parser.import_records(inputtext)
 
     # Dump the record_list
-    with open("record_list.pickle", "wb") as f:
-        p.dump(record_list, f)
+    with open("results.pickle", "wb") as f:
+        p.dump({'records':record_list, 'errors':error_list}, f)
 
 
 def main():

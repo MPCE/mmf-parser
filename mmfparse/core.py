@@ -1,6 +1,7 @@
 import mysql.connector
 from uuid import uuid4
 import re
+from tqdm import tqdm
 
 from .util import DupeDict, ListDict
 
@@ -20,7 +21,7 @@ class mmfParser(object):
     encoding (str): the encoding of the input MMF text file
     """
 
-    # Constant: field codes of the original MMF database
+    # Constants: field codes of the original MMF database
     EDITION_CODES = {
         '01':'identifier',
         '011':'edition_counter', # This is complicated. See below how the DupeDict is used
@@ -260,12 +261,14 @@ class mmfParser(object):
         # Regex for removing null entries
         ne = re.compile(r'^<\d{1,2}>$|^\s+$')
 
+        # A different regex: for splitting title
+
         # Now iterate over the list and extract key information
 
         # Initialise a cursor and define input sql
         self.cur = self.conn.cursor()
         insert_work = """
-        INSERT INTO mmf_work VALUES ('',
+        INSERT INTO mmf_work VALUES (NULL,
             %(uuid)s, %(identifier)s, %(translation)s,
             %(title)s, %(comments)s, %(bur_references)s, %(bur_comments)s,
             %(original_title)s, %(translation_comments)s,
@@ -273,7 +276,7 @@ class mmfParser(object):
         )
         """
         insert_edition = """
-        INSERT INTO mmf_edition VALUES (%(edition_id)s, %(work_id)s,
+        INSERT INTO mmf_edition VALUES (NULL, %(work_id)s,
             %(uuid)s, %(identifier)s, %(edition_counter)s, %(translation)s,
             %(author)s, %(translator)s, %(short_title)s, %(long_title)s,
             %(collection_title)s, %(publication_details)s,
@@ -286,7 +289,8 @@ class mmfParser(object):
         # Accumulators
         record_list = []
         error_list = []
-        for record in text:
+        print("Processing records...")
+        for record in tqdm(text):
             
             out = {}
 
@@ -304,31 +308,29 @@ class mmfParser(object):
             # Field 21 is the title field for editions:
             if '21' in record and len(record['21']) > 0:
                 # Create new dict for the edition
-                ed = {
-                    'edition_id':None,
-                    'work_id':None,
-                    'uuid':str(uuid4())
-                    }
+                ed = {}.fromkeys(self.EDITION_CODES.values())
+
+                # Set uuid and edition id
+                ed['uuid'] = str(uuid4())
+                ed['work_id'] = None # This is unknown for re-editions
+
                 # Loop through the field definitions for editions,
                 # and extract the key information
-                for code,field in self.EDITION_CODES.items():
+                for code, field in self.EDITION_CODES.items():
                     if code in record:
                         ed[field] = record[code]
-                    else:
-                        ed[field] = None
+                
                 # Concatenate two halves of title
                 if ed['long_title'] is not None:
                     ed['long_title'] = ed['short_title'] + ed['long_title']
 
                 # Insert into DB
                 self.cur.execute(insert_edition, ed)
+                self.conn.commit()
 
                 # Get new primary key
                 self.cur.execute("SELECT LAST_INSERT_ID()")
                 edition_id = self.cur.fetchone()[0]
-
-                # Commit changes to db
-                self.conn.commit()
 
                 out['ed'] = ed
 
@@ -344,20 +346,76 @@ class mmfParser(object):
                     param_seq = [(edition_id, lib.strip()) for lib in holdings]
                     # Insert them
                     self.cur.executemany(insert_holdings, param_seq)
+                    self.conn.commit()
 
                     out['holdings'] = param_seq
 
             # Titles of works are stored in field five
-            elif '5' in record and len(record['5'] > 0):
+            elif '5' in record and len(record['5']) > 0:
                 # Works in MMF2 need to be split into works and editions
-                wk = {'work_id': None, 'uuid': str(uuid4())}
-                ed = {'edition_id': None, 'uuid': str(uuid4())}
+                wk = {}.fromkeys(self.WORK_CODES.values())
+                ed = {}.fromkeys(self.EDITION_CODES.values())
 
-                # First insert the work:
+                # Extract data:
+                for code, field in self.WORK_CODES.items():
+                    if code in record:
+                        wk[field] = record[code]
                 
+                # Copy relevant data to edition dict:
+                for k, v in wk.items():
+                    if k in ed:
+                        ed[k] = v
 
+                # Set uuids
+                wk['uuid'] = str(uuid4())
+                ed['uuid'] = str(uuid4())
 
+                # Set edition counter
+                if ed['identifier'] is not None:
+                    ed['edition_counter'] = ed['identifier'][0:4] + '000'
+                
+                # Unpack title. Work title is short title.
+                title_parts = wk['title'].split('Z1')
+                wk['title'] = title_parts[0]
+                ed['long_title'] = ''.join(title_parts)
+                ed['short_title'] = title_parts[0]
 
+                # Insert work
+                self.cur.execute(insert_work, wk)
+                self.conn.commit()
+                
+                # Get primary key
+                self.cur.execute('SELECT LAST_INSERT_ID()')
+                ed['work_id'] = self.cur.fetchone()[0]
+
+                # Insert edition
+                self.cur.execute(insert_edition, ed)
+                self.conn.commit()
+
+                # Get new primary key
+                self.cur.execute('SELECT LAST_INSERT_ID()')
+                edition_id = self.cur.fetchone()[0]
+
+                # Logging: store dicts
+                out['wk'] = wk
+                out['ed'] = ed
+
+                # Explode holdings and insert them
+                # NB: above, holdings are seperated by commas, here by spaces
+                if ed['holdings'] is not None:
+                    # Explode the list of holdings
+                    holdings = ed['holdings'].split('  ')
+                    # Check to see if split worked, if not, split on commas:
+                    if len(holdings) == 1:
+                        holdings = holdings[0].split(',')
+                    # Create sequence of params for insert
+                    # Trim any whitespace from the library names as we go
+                    param_seq = [(edition_id, lib.strip()) for lib in holdings]
+                    # Insert them
+                    self.cur.executemany(insert_holdings, param_seq)
+                    self.conn.commit()
+
+                    out['holdings'] = param_seq
 
             else:
                 error_list.append({'record':record, 'error':'neither work nor edition'})
@@ -366,6 +424,8 @@ class mmfParser(object):
 
         # Close the cursor
         self.cur.close()
+
+        print(f'Database update complete. {len(record_list)} records processed, with {len(error_list)} errors.')
 
         return record_list, error_list
 
