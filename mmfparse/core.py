@@ -159,10 +159,11 @@ class mmfParser(object):
         'mmf_ref': """
         CREATE TABLE IF NOT EXISTS mmf_ref (
             ref_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            work_id INT NOT NULL,
             short_name VARCHAR(255),
-            bibliographic_reference TEXT,
-            ref_type INT NOT NULL,
-            page_num INT
+            page_num INT,
+            ref_work INT,
+            ref_type INT NOT NULL
         ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
         """,
         # Each reference is of one of two types
@@ -210,18 +211,27 @@ class mmfParser(object):
         """Creates essential tables for the MMF database."""
         
         # Do any of the tables exist?
-        cur = self.conn.cursor()
-        cur.execute('SHOW TABLES')
-        table_list = cur.fetchall()
+        self.cur = self.conn.cursor()
+        self.cur.execute('SHOW TABLES')
+        table_list = self.cur.fetchall()
         table_list = [tbl for (tbl,) in table_list if tbl in self.SCHEMA.keys()]
 
         # Inner function for creating table
         def _apply_schema():
             for table, stmt in self.SCHEMA.items():
-                cur.execute('DROP TABLE IF EXISTS %s' % table) # Can't use params because it wraps strings in quotation marks
-                cur.execute(stmt)
+                # Can't use params because it wraps strings in quotation marks
+                self.cur.execute('DROP TABLE IF EXISTS %s' % table)
+                self.cur.execute(stmt)
                 self.conn.commit()
                 print(f'Table {table} created in database {self.dbname}.')
+            # Insert values into mmf_ref_type
+            self.cur.execute("""
+            INSERT INTO mmf_ref_type VALUES
+            (NULL,'contemporary'),
+            (NULL,'post C18')
+            """)
+            self.conn.commit()
+
 
         # Allow user input, apply the schema
         if len(table_list) > 0:
@@ -231,18 +241,18 @@ class mmfParser(object):
                 confirmation = input('This will overwrite existing tables, are you sure? y/n\n')
                 if confirmation.startswith('y'):
                     _apply_schema()
-                    cur.close()
+                    self.cur.close()
                 else:
                     print('Overwrite not confirmed. Table creation skipped.')
-                    cur.close()
+                    self.cur.close()
                     return False
             else:
                 print('Table creation skipped.')
-                cur.close()
+                self.cur.close()
                 return False
         else:
             _apply_schema()
-            cur.close()
+            self.cur.close()
 
         return True
 
@@ -301,6 +311,11 @@ class mmfParser(object):
         INSERT INTO mmf_error VALUES (
             NULL, %(filename)s, %(edition_id)s,
             %(work_id)s, %(text)s, %(error_note)s, %(date)s
+            )
+        """
+        insert_references = """
+        INSERT INTO mmf_ref VALUES (
+            NULL, %(work_id)s, %(short_name)s, %(page_num)s, NULL, %(ref_type)s
             )
         """
 
@@ -437,6 +452,22 @@ class mmfParser(object):
                     # Insert them
                     self.cur.executemany(insert_holdings, param_seq)
                     self.conn.commit()
+                
+                # Explode references and insert them
+                if wk['contemporary_references'] is not None:
+                    # Explode into list
+                    cr_list = wk['contemporary_references'].split('  ')
+                    # Format for insert
+                    cr_list = [{'work_id':ed['work_id'], 'short_name':x, 'page_num':None, 'ref_type':1} for x in cr_list]
+                    self.cur.executemany(insert_references, cr_list)
+                    self.conn.commit()
+                
+                if wk['later_references'] is not None:
+                    # Explode into list
+                    lr_list = wk['later_references'].split('  ')
+                    # Extract page numbers
+                    pn_list = [] # TO DO!
+
 
                 successes += 1
 

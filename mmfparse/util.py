@@ -69,7 +69,6 @@ class ListDict(dict):
         for key in kwargs:
             self[key] = kwargs[key]
 
-
 class ErrorDict(dict):
     """A dict specifically for inserting errors into the MMF2 database."""
 
