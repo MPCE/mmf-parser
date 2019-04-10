@@ -1,3 +1,5 @@
+from datetime import date
+
 class DupeDict(dict):
     """A dict that prevents overwriting existing values.
 
@@ -68,3 +70,20 @@ class ListDict(dict):
             self[key] = kwargs[key]
 
 
+class ErrorDict(dict):
+    """A dict specifically for inserting errors into the MMF2 database."""
+
+    def __init__(self, inputtext):
+        self.update(
+            filename = inputtext,
+            date = date.today()
+        )
+        self.reset()
+    
+    def reset(self):
+        self.update(
+            edition_id=None,
+            work_id=None,
+            text=None,
+            error_note=None
+        )

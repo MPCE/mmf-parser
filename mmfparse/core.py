@@ -4,7 +4,7 @@ import re
 from tqdm import tqdm
 from datetime import date
 
-from .util import DupeDict
+from .util import DupeDict, ErrorDict
 
 class mmfParser(object):
     """Main class for parsing MMF output files.
@@ -177,7 +177,10 @@ class mmfParser(object):
         CREATE TABLE IF NOT EXISTS mmf_error (
             error_id INT AUTO_INCREMENT PRIMARY KEY,
             filename VARCHAR(255),
+            edition_id INT,
+            work_id INT,
             text TEXT,
+            error_note VARCHAR(255),
             date DATE
         ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
         """
@@ -295,13 +298,19 @@ class mmfParser(object):
         INSERT INTO mmf_holding VALUES (NULL, %s, %s, NULL)
         """
         insert_error = """
-        INSERT INTO mmf_error VALUES (NULL, %s, %s, %s)
+        INSERT INTO mmf_error VALUES (
+            NULL, %(filename)s, %(edition_id)s,
+            %(work_id)s, %(text)s, %(error_note)s, %(date)s
+            )
         """
 
         print("Processing records...")
+        err = ErrorDict(inputtext) # Initialise ErrorDict
         successes = 0
         errors = 0
         for record in tqdm(text):
+
+            err.reset()
 
             # Extract record into dict
             record = nl.sub(" ", record)  # newlines
@@ -354,6 +363,19 @@ class mmfParser(object):
                     self.conn.commit()
                 
                 successes += 1
+
+                # Check all data has been imported
+                unused_codes = set(record) - set(self.EDITION_CODES)
+                if len(unused_codes) > 0:
+                    err.update(
+                        edition_id=edition_id,
+                        text=str(record),
+                        error_note=f'Unused codes: {unused_codes}'
+                    )
+                    self.cur.execute(insert_error, err)
+                    self.conn.commit()
+                    errors += 1
+
 
             # Titles of works are stored in field five
             elif '5' in record and len(record['5']) > 0:
@@ -418,8 +440,24 @@ class mmfParser(object):
 
                 successes += 1
 
+                # Check all data has been imported
+                unused_codes = set(record) - set(self.WORK_CODES)
+                if len(unused_codes) > 0:
+                    err.update(
+                        work_id=ed['work_id'],
+                        text=str(record),
+                        error_note=f'Unused codes: {unused_codes}'
+                    )
+                    self.cur.execute(insert_error, err)
+                    self.conn.commit()
+                    errors += 1
+
             else:
-                self.cur.execute(insert_error, (inputtext, str(record), date.today()))
+                err.update(
+                    text=str(record),
+                    error_note="Neither princeps nor re-edition"
+                )
+                self.cur.execute(insert_error, err)
                 self.conn.commit()
                 errors += 1
 
@@ -437,7 +475,7 @@ class mmfParser(object):
         to it. The aim of the 'identifier' field in the original database
         was to enable such cross-referencing."""
 
-        # SQL query
+        # SQL statement
         link_book_stmt = """
         UPDATE mmf_edition AS e
         LEFT JOIN mmf_work AS w ON e.identifier = w.identifier
@@ -445,7 +483,7 @@ class mmfParser(object):
         WHERE e.work_id IS NULL
         """
 
-        # Open cursor
+        # Execute statement
         self.cur = self.conn.cursor()
         print("Linking editions to works...")
         self.cur.execute(link_book_stmt)
@@ -453,4 +491,36 @@ class mmfParser(object):
         self.conn.commit()
         print(f'{num_affected} links created.')
         self.cur.close()
+    
+    def update_libraries(self):
+        """Updates library table based on holdings."""
 
+        # SQL to create new libraries
+        new_lib_stmt = """
+        INSERT INTO mmf_lib (short_name)
+            SELECT DISTINCT mmf_holding.lib_name
+            FROM mmf_holding
+            WHERE mmf_holding.lib_name NOT IN(SELECT short_name FROM mmf_lib) 
+        """
+        # Update links to mmf_holding
+        link_lib_stmt = """
+        UPDATE mmf_holding AS h
+        LEFT JOIN mmf_lib AS l ON h.lib_name = l.short_name
+        SET h.lib_id = l.lib_id
+        WHERE h.lib_id IS NULL
+        """
+
+        # Execute
+        self.cur = self.conn.cursor()
+        print("Updating library table...")
+        self.cur.execute(new_lib_stmt)
+        new_libs = self.cur.rowcount
+        print("Linking holdings to libraries...")
+        self.cur.execute(link_lib_stmt)
+        new_links = self.cur.rowcount
+        self.conn.commit()
+        print(f'{new_libs} new libraries added to mmf_lib.')
+        print(f'{new_links} links created between libraries and holdings')
+        self.cur.close()
+
+    
