@@ -24,8 +24,9 @@ class mmfParser(object):
 
     # Constants: field codes of the original MMF database
     EDITION_CODES = {
-        '01':'identifier',
-        '011':'edition_counter', # This is complicated. See below how the DupeDict is used
+        '0':'full_identifier',
+        '1':'work_identifier',
+        '01':'ed_identifier',
         '20':'edition_counter',
         '04':'translation',
         '02':'author',
@@ -41,7 +42,8 @@ class mmfParser(object):
         'Incipit':'first_text'
     }
     WORK_CODES = {
-        '01': 'identifier',
+        '0': 'full_identifier',
+        '1': 'work_identifier',
         '4': 'translation',
         '2': 'author',
         '3': 'translator',
@@ -81,8 +83,8 @@ class mmfParser(object):
         "\\": "ç",  # One backslash represents a ç
         "O|":"Où",
         "o|":"où",
-        "o+e":"œ",
-        "O+E":"Œ",
+        "o+e": "œ",
+        "O+E": "Œ",
         "/.../":"[...]",
         "/sic/":"[sic]",
         "/sic==/":"[sic]",
@@ -90,7 +92,6 @@ class mmfParser(object):
         "==/":"]",
         "/_":"[",
         "_/":"]",
-        "Z2":"",
         "Z3":"",
         "`":"'",
         "\"":"'"
@@ -103,7 +104,7 @@ class mmfParser(object):
         CREATE TABLE IF NOT EXISTS mmf_work (
             work_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             uuid CHAR(36) NOT NULL,
-            identifier VARCHAR(255),
+            work_identifier CHAR(12),
             translation VARCHAR(128),
             title TEXT,
             comments TEXT,
@@ -111,9 +112,8 @@ class mmfParser(object):
             bur_comments TEXT,
             original_title TEXT,
             translation_comments TEXT,
-            description TEXT,
-            INDEX(identifier)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+            description TEXT
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each 're-edition' is represented by an edition
         'mmf_edition': """
@@ -121,7 +121,8 @@ class mmfParser(object):
             edition_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             work_id INT,
             uuid CHAR(36) NOT NULL,
-            identifier VARCHAR(255),
+            work_identifier CHAR(12),
+            ed_identifer CHAR(12),
             edition_counter CHAR(7),
             translation VARCHAR(128),
             author VARCHAR(255),
@@ -132,9 +133,8 @@ class mmfParser(object):
             publication_details TEXT,
             comments TEXT,
             final_comments TEXT,
-            first_text TEXT,
-            INDEX(identifier)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+            first_text TEXT
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each library copy is represented by a holding
         'mmf_holding': """
@@ -142,10 +142,8 @@ class mmfParser(object):
             holding_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             edition_id INT NOT NULL,
             lib_name VARCHAR(255),
-            lib_id INT,
-            INDEX(edition_id),
-            INDEX(lib_id)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+            lib_id INT
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each library is represented by a library
         'mmf_lib': """
@@ -153,7 +151,7 @@ class mmfParser(object):
             lib_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             short_name VARCHAR(255),
             full_name TEXT
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each reference is respresented as a reference
         'mmf_ref': """
@@ -164,14 +162,14 @@ class mmfParser(object):
             page_num INT,
             ref_work INT,
             ref_type INT NOT NULL
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each reference is of one of two types
         'mmf_ref_type': """
         CREATE TABLE IF NOT EXISTS mmf_ref_type (
             ref_type_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             name VARCHAR(255)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8mb4
         """,
         # Table for recording errors
         'mmf_error': """
@@ -183,9 +181,38 @@ class mmfParser(object):
             text TEXT,
             error_note VARCHAR(255),
             date DATE
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8
+        ) ENGINE=InnoDB  CHARSET=utf8mb4
         """
     }
+
+    # Combined list of indexes that can be deleted and rebuilt as required
+    INDEXES = [
+        {
+            'table': 'mmf_work',
+            'name': 'work_work_identifier',
+            'column': 'work_identifier'
+        },
+        {
+            'table': 'mmf_edition',
+            'name': 'edition_work_identifier',
+            'column': 'work_identifier'
+        },
+        {
+            'table': 'mmf_holding',
+            'name': 'holding_edition',
+            'column': 'edition_id'
+        },
+        {
+            'table': 'mmf_holding',
+            'name': 'holding_lib_name',
+            'column': 'lib_name'
+        },
+        {
+            'table': 'mmf_lib',
+            'name': 'lib_lib_name',
+            'column': 'short_name'
+        }
+    ]
 
     def __init__(self, username, password, host, dbname, encoding):
         
@@ -201,7 +228,8 @@ class mmfParser(object):
             user=username,
             password=password,
             host=host,
-            database=dbname
+            database=dbname,
+            use_unicode = True
             )
         
         # Alert user
@@ -278,11 +306,25 @@ class mmfParser(object):
         # Regex for stripping out extraneous newlines
         nl = re.compile(r'\n(?!%)')
         # Regex for stripping out extraneous dollar signs
-        ds = re.compile(r'\$(?=\n|$)')
+        ds = re.compile(r'\$\s?(?=\n+|$)')
         # Regex for pulling out keys and values
         kv = re.compile(r'<?(\d{1,2}|Incipit)>?:(.+?)\s*(?:\n|$)')
         # Regex for removing null entries
         ne = re.compile(r'^<\d{1,2}>$|^\s+$')
+
+        # Regex for extracting page numbers from references
+        pages_rgx = re.compile(r'\b\d+\b')
+
+        # Regex for checking signature of identifiers
+        ident = re.compile(r'(?:\d{2}\w{2}|s\.d\.)\..{3}\.')
+        
+        # Regex for splitting titles
+        title_rgx = re.compile(r'Z[12]')
+
+        # Regex for extracting library names from holdings
+        # It looks for a word consisting of a name (which may contain
+        # hyphens), followed by a hyphen and 1-5 capitals
+        holding_rgx = re.compile(r'\b[\w\-]+-[A-Z]{1,5}\b')
 
         # Now iterate over the list and extract key information
 
@@ -290,7 +332,7 @@ class mmfParser(object):
         self.cur = self.conn.cursor()
         insert_work = """
         INSERT INTO mmf_work VALUES (NULL,
-            %(uuid)s, %(identifier)s, %(translation)s,
+            %(uuid)s, %(work_identifier)s, %(translation)s,
             %(title)s, %(comments)s, %(bur_references)s, %(bur_comments)s,
             %(original_title)s, %(translation_comments)s,
             %(description)s 
@@ -298,7 +340,8 @@ class mmfParser(object):
         """
         insert_edition = """
         INSERT INTO mmf_edition VALUES (NULL, %(work_id)s,
-            %(uuid)s, %(identifier)s, %(edition_counter)s, %(translation)s,
+            %(uuid)s, %(work_identifier)s, %(ed_identifier)s,
+            %(edition_counter)s, %(translation)s,
             %(author)s, %(translator)s, %(short_title)s, %(long_title)s,
             %(collection_title)s, %(publication_details)s,
             %(comments)s, %(final_comments)s, %(first_text)s
@@ -318,32 +361,49 @@ class mmfParser(object):
             NULL, %(work_id)s, %(short_name)s, %(page_num)s, NULL, %(ref_type)s
             )
         """
+        # Drop the indices on the identifier columns
+        for idx_dict in self.INDEXES:
+            self.cur.execute("DROP INDEX IF EXISTS {name} ON {table}".format(**idx_dict))
+        self.conn.commit()
 
         print("Processing records...")
         err = ErrorDict(inputtext) # Initialise ErrorDict
-        successes = 0
-        errors = 0
-        for record in tqdm(text):
+        successes = 0 # Count successful writes to databse
+        errors = 0 # Count errors during import
+        pbar = tqdm(total = len(text)) # Initialise progress bar
+        while len(text) > 0:
 
+            # Get next record
+            record = text.pop()
+            # Reset error dict
             err.reset()
 
             # Extract record into dict
             record = nl.sub(" ", record)  # newlines
             record = ds.sub("", record)  # dollarsigns
-            record = DupeDict(kv.findall(record))  # information
-            record = {k:v for k,v in record.items() if not ne.match(v)} # null entries
+            record = dict(kv.findall(record))  # information
+            record = {k:v.strip() for k,v in record.items() if not ne.match(v)} # null entries
 
-            # Insert into database
+            # Check extracted data against full identifier
+            if '0' not in record or not ident.match(record['0'][0:12]):
+                err.update(
+                    text = str(record),
+                    error_note = "Invalid identifier")
+                self.cur.execute(insert_error, err)
+                self.conn.commit()
+                errors += 1
+                pbar.update(1)
+                continue
 
-            # Is this a princeps or a re-edition?
-            # Editions are distinguished by their 'edition_counter'
-            if '01' and '011' in record or '01' and '20' in record:
+            # Editions have an edition_identifier
+            if '01' in record:
                 # Create new dict for the edition
                 ed = {}.fromkeys(self.EDITION_CODES.values())
 
-                # Set uuid and edition id
+                # Set uuid, edition id, get work identifier
                 ed['uuid'] = str(uuid4())
                 ed['work_id'] = None # This is unknown for re-editions
+                ed['work_identifier'] = record['0'][0:12]
 
                 # Loop through the field definitions for editions,
                 # and extract the key information
@@ -351,9 +411,19 @@ class mmfParser(object):
                     if code in record:
                         ed[field] = record[code]
 
+                # Delete notes from edition_counter, if there are any
+                if ed['edition_counter'] is not None:
+                    ed['edition_counter'] = ed['edition_counter'][0:7]
+
                 # Concatenate two halves of title
-                if ed['long_title'] is not None:
+                if ed['long_title'] is not None and ed['short_title'] is not None:
                     ed['long_title'] = ed['short_title'] + ed['long_title']
+                
+                # Sometimes the long title is in field 21, with a Z1 or Z2 seperating the two components
+                if ed['short_title'] is not None and title_rgx.search(ed['short_title']):
+                    segs = title_rgx.split(ed['short_title'])
+                    ed['long_title'] = segs[0] + segs[1]
+                    ed['short_title'] = segs[0]
 
                 # Insert into DB
                 self.cur.execute(insert_edition, ed)
@@ -365,16 +435,17 @@ class mmfParser(object):
 
                 # Explode holdings and insert them
                 if ed['holdings'] is not None:
-                    # Explode the list of holdings
-                    holdings = ed['holdings'].split(',')
-                    # Check to see if split worked, if not, split on two spaces:
-                    if len(holdings) == 1:
-                        holdings = holdings[0].split('  ')
-                    # Create sequence of params for insert
-                    # Trim any whitespace from the library names as we go
-                    param_seq = [(edition_id, lib.strip()) for lib in holdings]
-                    # Insert them
-                    self.cur.executemany(insert_holdings, param_seq)
+                    # Extract holdings using regex
+                    holdings = holding_rgx.findall(ed['holdings'])
+                    # If none are extracted, log an error
+                    if len(holdings) == 0:
+                        err.update(text = str(record), error_note = "Junk holdings")
+                        self.cur.execute(insert_error, err)
+                    else:
+                        # Create parameter sequence
+                        param_seq = [(edition_id, lib) for lib in holdings]
+                        # Insert the holdings
+                        self.cur.executemany(insert_holdings, param_seq)
                     self.conn.commit()
                 
                 successes += 1
@@ -392,8 +463,8 @@ class mmfParser(object):
                     errors += 1
 
 
-            # Titles of works are stored in field five
-            elif '5' in record and len(record['5']) > 0:
+            # The princeps has no edition identifier
+            elif '1' in record:
                 # Works in MMF2 need to be split into works and editions
                 wk = {}.fromkeys(self.WORK_CODES.values())
                 ed = {}.fromkeys(self.EDITION_CODES.values())
@@ -412,15 +483,20 @@ class mmfParser(object):
                 wk['uuid'] = str(uuid4())
                 ed['uuid'] = str(uuid4())
 
-                # Set edition counter
-                if ed['identifier'] is not None:
-                    ed['edition_counter'] = ed['identifier'][0:4] + '000'
+                # Set identifiers and edition counter
+                if ed['work_identifier'] is not None:
+                    ed['ed_identifier'] = ed['work_identifier']
+                else:
+                    ed['work_identifier'] = ed['ed_identifier'] = ed['full_identifier'][0:7]
+                
+                ed['edition_counter'] = ed['ed_identifier'][0:4] + '000'
                 
                 # Unpack title. Work title is short title.
-                title_parts = wk['title'].split('Z1')
-                wk['title'] = title_parts[0]
-                ed['long_title'] = ''.join(title_parts)
-                ed['short_title'] = title_parts[0]
+                if wk['title']:
+                    title_parts = wk['title'].split('Z1')
+                    wk['title'] = title_parts[0]
+                    ed['long_title'] = ''.join(title_parts)
+                    ed['short_title'] = title_parts[0]
 
                 # Insert work
                 self.cur.execute(insert_work, wk)
@@ -440,17 +516,19 @@ class mmfParser(object):
 
                 # Explode holdings and insert them
                 # NB: above, holdings are seperated by commas, here by spaces
+                # Extract holdings using regex
                 if ed['holdings'] is not None:
-                    # Explode the list of holdings
-                    holdings = ed['holdings'].split('  ')
-                    # Check to see if split worked, if not, split on commas:
-                    if len(holdings) == 1:
-                        holdings = holdings[0].split(',')
-                    # Create sequence of params for insert
-                    # Trim any whitespace from the library names as we go
-                    param_seq = [(edition_id, lib.strip()) for lib in holdings]
-                    # Insert them
-                    self.cur.executemany(insert_holdings, param_seq)
+                    holdings = holding_rgx.findall(ed['holdings'])
+                    # If none are extracted, log an error
+                    if len(holdings) == 0:
+                        err.update(text=str(record), error_note="Junk holdings")
+                        self.cur.execute(insert_error, err)
+                    else:
+                        # Create parameter sequence
+                        param_seq = [(edition_id, lib)
+                                     for lib in holdings]
+                        # Insert the holdings
+                        self.cur.executemany(insert_holdings, param_seq)
                     self.conn.commit()
                 
                 # Explode references and insert them
@@ -465,9 +543,29 @@ class mmfParser(object):
                 if wk['later_references'] is not None:
                     # Explode into list
                     lr_list = wk['later_references'].split('  ')
-                    # Extract page numbers
-                    pn_list = [] # TO DO!
-
+                    # Unpack using pagenum regex 
+                    lr_out = []
+                    for ref in lr_list:
+                        ref_dict = {'work_id':ed['work_id'], 'ref_type':2, 'page_num':None}
+                        # Use regex to strip page numbers
+                        ref_dict['short_name'] = pages_rgx.sub('', ref).strip()
+                        # Extract page numbers...
+                        pages = pages_rgx.findall(ref)
+                        # If there are any pages, create an entry for each paged reference
+                        if len(pages) > 0:
+                            for page in pages:
+                                # Create copy of dict
+                                ref_dict = ref_dict.copy()
+                                # Insert new page number
+                                ref_dict['page_num'] = page
+                                # Append to parameter list for insert query
+                                lr_out.append(ref_dict)
+                        # Otherwise just add the reference to the out_list
+                        else:
+                            lr_out.append(ref_dict)
+                    
+                    self.cur.executemany(insert_references, lr_out)
+                    self.conn.commit()
 
                 successes += 1
 
@@ -492,12 +590,21 @@ class mmfParser(object):
                 self.conn.commit()
                 errors += 1
 
+            pbar.update(1)
+        
+        # Close the progress bar
+        pbar.close()
+
+        # Rebuild the indexes
+        print('Rebuilding indexes...')
+        for idx_dict in self.INDEXES:
+            self.cur.execute("CREATE INDEX {name} ON {table} ({column})".format(**idx_dict))
+        self.conn.commit()
+
         # Close the cursor
         self.cur.close()
 
         print(f'Database update complete. {successes} records inserted, with {errors} errors.')
-
-        return None
 
     def link_books(self):
         """Attempts to link related records across the database.
@@ -509,7 +616,7 @@ class mmfParser(object):
         # SQL statement
         link_book_stmt = """
         UPDATE mmf_edition AS e
-        LEFT JOIN mmf_work AS w ON e.identifier = w.identifier
+        LEFT JOIN mmf_work AS w ON e.work_identifier = w.work_identifier
         SET e.work_id = w.work_id
         WHERE e.work_id IS NULL
         """
