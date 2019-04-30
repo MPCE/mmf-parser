@@ -316,17 +316,19 @@ class mmfParser(object):
         pages_rgx = re.compile(r'\b\d+\b')
 
         # Regex for checking signature of identifiers
-        ident = re.compile(r'(?:\d{2}\w{2}|s\.d\.)\..{3}\.')
+        wrk_id_rgx = re.compile(r'^(?:\d{2}\w{2}|s\.d\.)\.[A-Z ]{3}\.[a-z\d]{3}\b')
+        ed_id_rgx = re.compile(r'^.{12} (?:\d{2}\w{2}|s\.d\.)\.[A-Z ]{3}\.[a-z\d]{3}\b')
         
         # Regex for splitting titles
         title_rgx = re.compile(r'Z[12]')
+
+        # Regex for finding deleted or hidden entries
+        hidden_rgx = re.compile(r'(\bz+\b|ENTERED|x+(?<!\b\d{2}))', re.I)
 
         # Regex for extracting library names from holdings
         # It looks for a word consisting of a name (which may contain
         # hyphens), followed by a hyphen and 1-5 capitals
         holding_rgx = re.compile(r'\b[\w\-]+-[A-Z]{1,5}\b')
-
-        # Now iterate over the list and extract key information
 
         # Initialise a cursor and define input sql
         self.cur = self.conn.cursor()
@@ -371,12 +373,15 @@ class mmfParser(object):
         successes = 0 # Count successful writes to databse
         errors = 0 # Count errors during import
         pbar = tqdm(total = len(text)) # Initialise progress bar
+
+        # Iterate over the records:
         while len(text) > 0:
 
             # Get next record
             record = text.pop()
             # Reset error dict
             err.reset()
+            unused_codes = set()
 
             # Extract record into dict
             record = nl.sub(" ", record)  # newlines
@@ -384,32 +389,58 @@ class mmfParser(object):
             record = dict(kv.findall(record))  # information
             record = {k:v.strip() for k,v in record.items() if not ne.match(v)} # null entries
 
-            # Check extracted data against full identifier
-            if '0' not in record or not ident.match(record['0'][0:12]):
+            # Extract key info from full identifier
+            if '0' not in record:
                 err.update(
                     text = str(record),
-                    error_note = "Invalid identifier")
+                    error_note = "No identifier")
                 self.cur.execute(insert_error, err)
                 self.conn.commit()
                 errors += 1
                 pbar.update(1)
                 continue
+            
+            if hidden_rgx.search(record['0']):
+                err.update(
+                    text=str(record),
+                    error_note="Hidden or deleted")
+                self.cur.execute(insert_error, err)
+                self.conn.commit()
+                pbar.update(1)
+                continue
+            
+            work_identifier = wrk_id_rgx.findall(record['0'])
+            ed_identifier = ed_id_rgx.findall(record['0'])
 
-            # Editions have an edition_identifier
-            if '01' in record:
+            # Editions have both edition and work identifiers
+            if len(ed_identifier) > 0 and len(work_identifier) > 0:
                 # Create new dict for the edition
                 ed = {}.fromkeys(self.EDITION_CODES.values())
 
                 # Set uuid, edition id, get work identifier
                 ed['uuid'] = str(uuid4())
                 ed['work_id'] = None # This is unknown for re-editions
-                ed['work_identifier'] = record['0'][0:12]
 
                 # Loop through the field definitions for editions,
                 # and extract the key information
                 for code, field in self.EDITION_CODES.items():
                     if code in record:
                         ed[field] = record[code]
+                
+                # Hoover up any information stored in the wrong fields
+                for code, field in self.WORK_CODES.items():
+                    if code not in self.EDITION_CODES and field in ed and code in record:
+                        if ed[field] is None:
+                            ed[field] = record[code]
+                        elif ed[field] is not None:
+                            unused_codes.add(code)
+                
+                # If work_identifier has not been provided, include it now
+                ed['work_identifier'] = work_identifier[0]
+                
+                # Add edition identifier
+                if ed['ed_identifier'] is None:
+                    ed['ed_identifier'] = ed_identifier[0]
 
                 # Delete notes from edition_counter, if there are any
                 if ed['edition_counter'] is not None:
@@ -439,7 +470,10 @@ class mmfParser(object):
                     holdings = holding_rgx.findall(ed['holdings'])
                     # If none are extracted, log an error
                     if len(holdings) == 0:
-                        err.update(text = str(record), error_note = "Junk holdings")
+                        err.update(
+                            text = ed['holdings'],
+                            error_note = "Junk holdings",
+                            edition_id = edition_id)
                         self.cur.execute(insert_error, err)
                     else:
                         # Create parameter sequence
@@ -450,21 +484,8 @@ class mmfParser(object):
                 
                 successes += 1
 
-                # Check all data has been imported
-                unused_codes = set(record) - set(self.EDITION_CODES)
-                if len(unused_codes) > 0:
-                    err.update(
-                        edition_id=edition_id,
-                        text=str(record),
-                        error_note=f'Unused codes: {unused_codes}'
-                    )
-                    self.cur.execute(insert_error, err)
-                    self.conn.commit()
-                    errors += 1
-
-
             # The princeps has no edition identifier
-            elif '1' in record:
+            elif len(work_identifier) > 0:
                 # Works in MMF2 need to be split into works and editions
                 wk = {}.fromkeys(self.WORK_CODES.values())
                 ed = {}.fromkeys(self.EDITION_CODES.values())
@@ -478,25 +499,37 @@ class mmfParser(object):
                 for k, v in wk.items():
                     if k in ed:
                         ed[k] = v
-
+                
+                # Hoover up any remaining info
+                for code,field in self.EDITION_CODES.items():
+                    if code not in self.WORK_CODES and code in record:
+                        if field in wk and wk[field] is None:
+                            wk[field] = record[code]
+                        if field in ed and ed[field] is None:
+                            ed[field] = record[code]
+                        else:
+                            unused_codes.add(code)
+                
                 # Set uuids
                 wk['uuid'] = str(uuid4())
                 ed['uuid'] = str(uuid4())
 
                 # Set identifiers and edition counter
-                if ed['work_identifier'] is not None:
-                    ed['ed_identifier'] = ed['work_identifier']
-                else:
-                    ed['work_identifier'] = ed['ed_identifier'] = ed['full_identifier'][0:7]
-                
+                if wk['work_identifier'] is None:
+                    wk['work_identifier'] = ed['work_identifier'] = work_identifier[0]             
+
+                ed['ed_identifier'] = ed['work_identifier']
                 ed['edition_counter'] = ed['ed_identifier'][0:4] + '000'
                 
                 # Unpack title. Work title is short title.
-                if wk['title']:
-                    title_parts = wk['title'].split('Z1')
+                if wk['title'] is not None:
+                    title_parts = title_rgx.split(wk['title'])
                     wk['title'] = title_parts[0]
                     ed['long_title'] = ''.join(title_parts)
                     ed['short_title'] = title_parts[0]
+                elif ed['short_title'] is not None:
+                    if ed['long_title'] is not None:
+                        ed['long_title']
 
                 # Insert work
                 self.cur.execute(insert_work, wk)
@@ -521,7 +554,10 @@ class mmfParser(object):
                     holdings = holding_rgx.findall(ed['holdings'])
                     # If none are extracted, log an error
                     if len(holdings) == 0:
-                        err.update(text=str(record), error_note="Junk holdings")
+                        err.update(
+                            text=ed['holdings'],
+                            error_note="Junk holdings",
+                            edition_id = edition_id)
                         self.cur.execute(insert_error, err)
                     else:
                         # Create parameter sequence
@@ -569,23 +605,24 @@ class mmfParser(object):
 
                 successes += 1
 
-                # Check all data has been imported
-                unused_codes = set(record) - set(self.WORK_CODES)
-                if len(unused_codes) > 0:
-                    err.update(
-                        work_id=ed['work_id'],
-                        text=str(record),
-                        error_note=f'Unused codes: {unused_codes}'
-                    )
-                    self.cur.execute(insert_error, err)
-                    self.conn.commit()
-                    errors += 1
-
             else:
                 err.update(
                     text=str(record),
-                    error_note="Neither princeps nor re-edition"
+                    error_note="Invalid identifier"
                 )
+                self.cur.execute(insert_error, err)
+                self.conn.commit()
+                errors += 1
+
+            if len(unused_codes) > 0:
+                try:
+                    err.update(
+                        edition_id=edition_id,
+                        text=str(record),
+                        error_note=f'Unused codes: {unused_codes}'
+                    )
+                except:
+                    breakpoint()
                 self.cur.execute(insert_error, err)
                 self.conn.commit()
                 errors += 1
@@ -613,21 +650,32 @@ class mmfParser(object):
         to it. The aim of the 'identifier' field in the original database
         was to enable such cross-referencing."""
 
-        # SQL statement
+        # SQL statements
+        new_work_stmt = """
+        INSERT INTO mmf_work (work_identifier, title, translation)
+            SELECT work_identifier, short_title, translation
+            FROM mmf_edition
+            WHERE mmf_edition.work_identifier NOT IN(SELECT work_identifier FROM mmf_work)
+        """
         link_book_stmt = """
         UPDATE mmf_edition AS e
         LEFT JOIN mmf_work AS w ON e.work_identifier = w.work_identifier
         SET e.work_id = w.work_id
         WHERE e.work_id IS NULL
         """
+        
+        # TO DO: Eliminate duplicates from mmf_work
 
         # Execute statement
         self.cur = self.conn.cursor()
+        print("Creating missing works...")
+        self.cur.execute(new_work_stmt)
+        new_books = self.cur.rowcount
         print("Linking editions to works...")
         self.cur.execute(link_book_stmt)
-        num_affected = self.cur.rowcount
+        new_links = self.cur.rowcount
         self.conn.commit()
-        print(f'{num_affected} links created.')
+        print(f'{new_books} works created. {new_links} links created.')
         self.cur.close()
     
     def update_libraries(self):
