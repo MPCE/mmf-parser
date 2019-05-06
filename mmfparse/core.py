@@ -729,7 +729,7 @@ class mmfParser(object):
         """Searches for duplicates in the works table, and merges them."""
 
         # Create temporary table to work with
-        create_dupe_table """
+        create_dupe_table =  """
         CREATE TEMPORARY TABLE dupe_work
         SELECT * FROM mmf_work
             GROUP BY work_identifier
