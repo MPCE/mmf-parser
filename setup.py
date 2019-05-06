@@ -10,7 +10,7 @@ setup(
     name="mmfparse",
     version="0.1dev",
     packages=find_packages(),
-    license="MIT",
+    license="Unlicense",
     long_description = long_description,
     long_description_content_type = "text/markdown",
     entry_points = {

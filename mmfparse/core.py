@@ -310,7 +310,7 @@ class mmfParser(object):
         # Regex for pulling out keys and values
         kv = re.compile(r'<?(\d{1,2}|Incipit)>?:(.+?)\s*(?:\n|$)')
         # Regex for removing null entries
-        ne = re.compile(r'^<\d{1,2}>$|^\s+$')
+        ne = re.compile(r'^<\d{1,2}>$|^\$?[\s\n]+$')
 
         # Regex for extracting page numbers from references
         pages_rgx = re.compile(r'\b\d+\b')
@@ -363,6 +363,13 @@ class mmfParser(object):
             NULL, %(work_id)s, %(short_name)s, %(page_num)s, NULL, %(ref_type)s
             )
         """
+
+        # Error logging function
+        def _log_error(**kwargs):
+            err.update(**kwargs)
+            self.cur.execute(insert_error, err)
+            self.conn.commit()
+
         # Drop the indices on the identifier columns
         for idx_dict in self.INDEXES:
             self.cur.execute("DROP INDEX IF EXISTS {name} ON {table}".format(**idx_dict))
@@ -401,14 +408,37 @@ class mmfParser(object):
                 continue
             
             if hidden_rgx.search(record['0']):
-                err.update(
+                _log_error(
                     text=str(record),
-                    error_note="Hidden or deleted")
-                self.cur.execute(insert_error, err)
-                self.conn.commit()
+                    error_note="Hidden or deleted"
+                    )
                 pbar.update(1)
                 continue
             
+            if '4' in record and record['4'].startswith('xx'):
+                _log_error(
+                    text=str(record),
+                    error_note="Hidden or deleted"
+                )
+                pbar.update(1)
+                continue
+            
+            if '04' in record and record['04'].startswith('xx'):
+                _log_error(
+                    text=str(record),
+                    error_note="Hidden or deleted"
+                )
+                pbar.update(1)
+                continue
+            
+            if '1' not in record and '01' not in record:
+                _log_error(
+                    text = str(record),
+                    error_note = "Incomplete identifiers"
+                )
+                pbar.update(1)
+                continue
+
             work_identifier = wrk_id_rgx.findall(record['0'])
             ed_identifier = ed_id_rgx.findall(record['0'])
 
@@ -470,17 +500,16 @@ class mmfParser(object):
                     holdings = holding_rgx.findall(ed['holdings'])
                     # If none are extracted, log an error
                     if len(holdings) == 0:
-                        err.update(
+                        _log_error(
                             text = ed['holdings'],
                             error_note = "Junk holdings",
                             edition_id = edition_id)
-                        self.cur.execute(insert_error, err)
                     else:
                         # Create parameter sequence
                         param_seq = [(edition_id, lib) for lib in holdings]
                         # Insert the holdings
                         self.cur.executemany(insert_holdings, param_seq)
-                    self.conn.commit()
+                        self.conn.commit()
                 
                 successes += 1
 
@@ -515,8 +544,7 @@ class mmfParser(object):
                 ed['uuid'] = str(uuid4())
 
                 # Set identifiers and edition counter
-                if wk['work_identifier'] is None:
-                    wk['work_identifier'] = ed['work_identifier'] = work_identifier[0]             
+                wk['work_identifier'] = ed['work_identifier'] = work_identifier[0]             
 
                 ed['ed_identifier'] = ed['work_identifier']
                 ed['edition_counter'] = ed['ed_identifier'][0:4] + '000'
@@ -534,7 +562,7 @@ class mmfParser(object):
                 # Insert work
                 self.cur.execute(insert_work, wk)
                 self.conn.commit()
-                
+
                 # Get primary key
                 self.cur.execute('SELECT LAST_INSERT_ID()')
                 ed['work_id'] = self.cur.fetchone()[0]
@@ -554,18 +582,18 @@ class mmfParser(object):
                     holdings = holding_rgx.findall(ed['holdings'])
                     # If none are extracted, log an error
                     if len(holdings) == 0:
-                        err.update(
+                        _log_error(
                             text=ed['holdings'],
                             error_note="Junk holdings",
-                            edition_id = edition_id)
-                        self.cur.execute(insert_error, err)
+                            edition_id = edition_id
+                            )
                     else:
                         # Create parameter sequence
                         param_seq = [(edition_id, lib)
                                      for lib in holdings]
                         # Insert the holdings
                         self.cur.executemany(insert_holdings, param_seq)
-                    self.conn.commit()
+                        self.conn.commit()
                 
                 # Explode references and insert them
                 if wk['contemporary_references'] is not None:
@@ -606,25 +634,18 @@ class mmfParser(object):
                 successes += 1
 
             else:
-                err.update(
+                _log_error(
                     text=str(record),
                     error_note="Invalid identifier"
                 )
-                self.cur.execute(insert_error, err)
-                self.conn.commit()
                 errors += 1
 
             if len(unused_codes) > 0:
-                try:
-                    err.update(
-                        edition_id=edition_id,
-                        text=str(record),
-                        error_note=f'Unused codes: {unused_codes}'
-                    )
-                except:
-                    breakpoint()
-                self.cur.execute(insert_error, err)
-                self.conn.commit()
+                _log_error(
+                    edition_id=edition_id,
+                    text=str(record),
+                    error_note=f'Unused codes: {unused_codes}'
+                )
                 errors += 1
 
             pbar.update(1)
@@ -653,7 +674,7 @@ class mmfParser(object):
         # SQL statements
         new_work_stmt = """
         INSERT INTO mmf_work (work_identifier, title, translation)
-            SELECT work_identifier, short_title, translation
+            SELECT DISTINCT work_identifier, short_title, translation
             FROM mmf_edition
             WHERE mmf_edition.work_identifier NOT IN(SELECT work_identifier FROM mmf_work)
         """
@@ -663,19 +684,16 @@ class mmfParser(object):
         SET e.work_id = w.work_id
         WHERE e.work_id IS NULL
         """
-        
-        # TO DO: Eliminate duplicates from mmf_work
 
         # Execute statement
         self.cur = self.conn.cursor()
         print("Creating missing works...")
         self.cur.execute(new_work_stmt)
-        new_books = self.cur.rowcount
+        print(f'{self.cur.rowcount} works created.')
         print("Linking editions to works...")
         self.cur.execute(link_book_stmt)
-        new_links = self.cur.rowcount
+        print(f'{self.cur.rowcount} links created.')
         self.conn.commit()
-        print(f'{new_books} works created. {new_links} links created.')
         self.cur.close()
     
     def update_libraries(self):
@@ -700,13 +718,34 @@ class mmfParser(object):
         self.cur = self.conn.cursor()
         print("Updating library table...")
         self.cur.execute(new_lib_stmt)
-        new_libs = self.cur.rowcount
+        print(f'{self.cur.rowcount} new libraries added to mmf_lib.')
         print("Linking holdings to libraries...")
         self.cur.execute(link_lib_stmt)
-        new_links = self.cur.rowcount
+        print(f'{self.cur.rowcount} links created between libraries and holdings')
         self.conn.commit()
-        print(f'{new_libs} new libraries added to mmf_lib.')
-        print(f'{new_links} links created between libraries and holdings')
         self.cur.close()
 
-    
+    def deduplicate_books(self):
+        """Searches for duplicates in the works table, and merges them."""
+
+        # Create temporary table to work with
+        create_dupe_table """
+        CREATE TEMPORARY TABLE dupe_work
+        SELECT * FROM mmf_work
+            GROUP BY work_identifier
+            HAVING COUNT(work_identifier) > 1
+            ORDER BY work_id DESC
+        """
+        # Update works with missing info from other entries
+        # TO DO: Update query
+        update_works = """
+        UPDATE mmf_work AS w
+        LEFT JOIN 
+        """
+
+        self.cur = self.conn.cursor()
+        print(f'Removing duplicate works...')
+        self.cur.execute(create_dupe_table)
+        print(f'{self.cur.rowcount} duplicates found.')
+        self.cur.execute(update_works)
+
