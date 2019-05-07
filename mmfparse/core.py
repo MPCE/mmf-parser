@@ -133,7 +133,8 @@ class mmfParser(object):
             publication_details TEXT,
             comments TEXT,
             final_comments TEXT,
-            first_text TEXT
+            first_text TEXT,
+            mpce_book_code CHAR(12)
         ) ENGINE=InnoDB  CHARSET=utf8mb4
         """,
         # Each library copy is represented by a holding
@@ -346,7 +347,7 @@ class mmfParser(object):
             %(edition_counter)s, %(translation)s,
             %(author)s, %(translator)s, %(short_title)s, %(long_title)s,
             %(collection_title)s, %(publication_details)s,
-            %(comments)s, %(final_comments)s, %(first_text)s
+            %(comments)s, %(final_comments)s, %(first_text)s, NULL
         )
         """
         insert_holdings = """
