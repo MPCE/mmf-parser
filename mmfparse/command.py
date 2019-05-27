@@ -19,13 +19,14 @@ def run(inputtext, username, password, host, dbname, encoding, newdb):
     # Import text
     parser.import_records(inputtext)
 
+    # Deduplicate works data
+    parser.deduplicate_books()
+
     # Find links in data
     parser.link_books()
 
     # Update library data
     parser.update_libraries()
-
-    
 
 
 def main():

@@ -729,24 +729,89 @@ class mmfParser(object):
     def deduplicate_books(self):
         """Searches for duplicates in the works table, and merges them."""
 
-        # Create temporary table to work with
-        create_dupe_table =  """
-        CREATE TEMPORARY TABLE dupe_work
-        SELECT * FROM mmf_work
-            GROUP BY work_identifier
-            HAVING COUNT(work_identifier) > 1
-            ORDER BY work_id DESC
+        # Extract duplicates from database
+        get_duplicates =  """
+        SELECT * FROM mmf_work AS mwa
+            WHERE EXISTS (
+                SELECT 1
+                FROM mmf_work AS mwb
+                WHERE mwa.work_identifier = mwb.work_identifier
+                LIMIT 1,1
+            )
+            ORDER BY work_identifier, work_id
         """
         # Update works with missing info from other entries
-        # TO DO: Update query
         update_works = """
-        UPDATE mmf_work AS w
-        LEFT JOIN 
+        UPDATE mmf_work
+        SET work_id = %s,
+            uuid = %s,
+            work_identifier = %s,
+            translation = %s,
+            title = %s,
+            comments = %s,
+            bur_references = %s,
+            bur_comments = %s,
+            original_title = %s,
+            translation_comments = %s,
+            description = %s
+        WHERE work_id = %s
+        """
+        # Amend foreign keys in edition table
+        correct_book_links = """
+        UPDATE mmf_edition
+        SET work_id = %s
+        WHERE work_id = %s
+        """
+        # Amend foreign keys in refs table
+        correct_ref_links = """
+        UPDATE mmf_ref
+        SET work_id = %s
+        WHERE work_id = %s
+        """
+        # Delete extraneous entries
+        delete_books = """
+        DELETE FROM mmf_work
+        WHERE work_id = %s
         """
 
         self.cur = self.conn.cursor()
         print(f'Removing duplicate works...')
-        self.cur.execute(create_dupe_table)
-        print(f'{self.cur.rowcount} duplicates found.')
-        self.cur.execute(update_works)
+        self.cur.execute(get_duplicates)
+        # Get list of duplicates
+        duplicates = self.cur.fetchall()
+        # Convert to dict, with a list of lists for each identifier
+        duplicates_dict = {}
+        for record in duplicates:
+            ident = record[2]
+            if ident in duplicates_dict:
+                duplicates_dict[ident].append(record)
+            else:
+                duplicates_dict[ident] = [record]
+        # Deduplicate and retrieve id mappings
+        deduplicated = []
+        id_mappings = []
+        for records in duplicates_dict.values():
+            # Keep the first non-None value for each value
+            deduped_rec = [next((val for val in tup if val not in {None, '$'}), None)
+                           for tup in zip(*records)]
+            # Add work_id for where clause of update query
+            deduped_rec += [records[0][0]]
+            # Append to main list
+            deduplicated.append(deduped_rec)
+            # Record the work ids to delete/amend
+            # Each is a tuple of old_id, new_id:
+            mapped_rec = [(rec[0], records[0][0]) for rec in records[1:]]
+            id_mappings += mapped_rec
+        
+        print(f'Updating mmf_work...')
+        self.cur.executemany(update_works, deduplicated)
+        breakpoint()
+        self.cur.executemany(delete_books, [(ids[0],) for ids in id_mappings])
+        print(f'{self.cur.rowcount} duplicate works deleted.')
+        self.conn.commit()
+        print(f'Updating links...')
+        self.cur.executemany(correct_book_links, id_mappings)
+        print(f'{self.cur.rowcount} links amended in mmf_edition.')
+        self.cur.executemany(correct_ref_links, id_mappings)
+        print(f'{self.cur.rowcount} links amended in mmf_ref.')
 
