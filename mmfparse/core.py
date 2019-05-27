@@ -815,4 +815,5 @@ class mmfParser(object):
         self.cur.executemany(correct_ref_links, id_mappings)
         print(f'{self.cur.rowcount} links amended in mmf_ref.')
         self.conn.commit()
+        self.cur.close()
 
