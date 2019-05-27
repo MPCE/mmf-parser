@@ -736,7 +736,8 @@ class mmfParser(object):
                 SELECT 1
                 FROM mmf_work AS mwb
                 WHERE mwa.work_identifier = mwb.work_identifier
-                LIMIT 1,1
+                AND mwa.work_id <> mwb.work_id
+                LIMIT 1
             )
             ORDER BY work_identifier, work_id
         """
@@ -805,7 +806,6 @@ class mmfParser(object):
         
         print(f'Updating mmf_work...')
         self.cur.executemany(update_works, deduplicated)
-        breakpoint()
         self.cur.executemany(delete_books, [(ids[0],) for ids in id_mappings])
         print(f'{self.cur.rowcount} duplicate works deleted.')
         self.conn.commit()
@@ -814,4 +814,5 @@ class mmfParser(object):
         print(f'{self.cur.rowcount} links amended in mmf_edition.')
         self.cur.executemany(correct_ref_links, id_mappings)
         print(f'{self.cur.rowcount} links amended in mmf_ref.')
+        self.conn.commit()
 
