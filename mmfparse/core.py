@@ -37,9 +37,7 @@ class mmfParser(object):
         '24':'publication_details',
         '25':'holdings',
         '26':'comments',
-        '19':'final_comments',
-        '30':'first_text',
-        'Incipit':'first_text'
+        '19':'final_comments'
     }
     WORK_CODES = {
         '0': 'full_identifier',
@@ -60,8 +58,8 @@ class mmfParser(object):
         '15': 'description',
         '18': 're_editions',
         '19': 'final_comments',
-        '30': 'first_text',
-        'Incipit': 'first_text'
+        '30': 'incipit',
+        'Incipit': 'incipit'
     }
 
     # Constant: ASCII codes from original MMF markup
@@ -112,8 +110,9 @@ class mmfParser(object):
             bur_comments TEXT,
             original_title TEXT,
             translation_comments TEXT,
-            description TEXT
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+            description TEXT,
+            incipit TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Each 're-edition' is represented by an edition
         'mmf_edition': """
@@ -122,7 +121,7 @@ class mmfParser(object):
             work_id INT,
             uuid CHAR(36) NOT NULL,
             work_identifier CHAR(12),
-            ed_identifer CHAR(12),
+            ed_identifier CHAR(12),
             edition_counter CHAR(7),
             translation VARCHAR(128),
             author VARCHAR(255),
@@ -133,9 +132,8 @@ class mmfParser(object):
             publication_details TEXT,
             comments TEXT,
             final_comments TEXT,
-            first_text TEXT,
-            mpce_book_code CHAR(12)
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+            mpce_edition_code CHAR(12)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Each library copy is represented by a holding
         'mmf_holding': """
@@ -144,7 +142,7 @@ class mmfParser(object):
             edition_id INT NOT NULL,
             lib_name VARCHAR(255),
             lib_id INT
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Each library is represented by a library
         'mmf_lib': """
@@ -152,7 +150,7 @@ class mmfParser(object):
             lib_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             short_name VARCHAR(255),
             full_name TEXT
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Each reference is respresented as a reference
         'mmf_ref': """
@@ -163,14 +161,14 @@ class mmfParser(object):
             page_num INT,
             ref_work INT,
             ref_type INT NOT NULL
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Each reference is of one of two types
         'mmf_ref_type': """
         CREATE TABLE IF NOT EXISTS mmf_ref_type (
             ref_type_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             name VARCHAR(255)
-        ) ENGINE=InnoDB  DEFAULT CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """,
         # Table for recording errors
         'mmf_error': """
@@ -182,7 +180,7 @@ class mmfParser(object):
             text TEXT,
             error_note VARCHAR(255),
             date DATE
-        ) ENGINE=InnoDB  CHARSET=utf8mb4
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
         """
     }
 
@@ -338,7 +336,7 @@ class mmfParser(object):
             %(uuid)s, %(work_identifier)s, %(translation)s,
             %(title)s, %(comments)s, %(bur_references)s, %(bur_comments)s,
             %(original_title)s, %(translation_comments)s,
-            %(description)s 
+            %(description)s, %(incipit)s
         )
         """
         insert_edition = """
@@ -347,7 +345,7 @@ class mmfParser(object):
             %(edition_counter)s, %(translation)s,
             %(author)s, %(translator)s, %(short_title)s, %(long_title)s,
             %(collection_title)s, %(publication_details)s,
-            %(comments)s, %(final_comments)s, %(first_text)s, NULL
+            %(comments)s, %(final_comments)s, NULL
         )
         """
         insert_holdings = """
@@ -754,7 +752,8 @@ class mmfParser(object):
             bur_comments = %s,
             original_title = %s,
             translation_comments = %s,
-            description = %s
+            description = %s,
+            incipit = %s
         WHERE work_id = %s
         """
         # Amend foreign keys in edition table
@@ -817,3 +816,23 @@ class mmfParser(object):
         self.conn.commit()
         self.cur.close()
 
+    def link_to_mpce(self, mpce_conn):
+        """Tries to link all the editions in the MMF data to an MPCE edition.
+        
+        Arguments:
+        ==========
+        mpce_conn: a connection to the MPCE database
+        """
+
+        # Step 1: Compare titles, years and publication data in MMF and MPCE
+
+        # Use Levenshtein distance? Cosine similarity?
+
+        # Step 2: Add edition codes to MMF-2 books that reach a certain threshold of similarity
+
+        # The following steps will probably need to be done carefully as a once-off:
+        #   - create new MPCE editions for all unknown MMF-2 editions
+        #   - run a match on the author names
+        #   - populate MPCE with new authors
+        #   - create book-author joins
+        pass
