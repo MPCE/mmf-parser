@@ -64,6 +64,9 @@ class mmfParser(object):
 
     # Constant: ASCII codes from original MMF markup
     ASCII_CODES = {
+        "A%%":"À",
+        "A%":"à",
+        "E%%":"È",
         "E%":"É",
         "{":"é",
         "}":"è",
@@ -78,6 +81,7 @@ class mmfParser(object):
         "i~":"ï",
         "o~":"ö",
         "u~":"ü",
+        "n~~": "ñ",
         "\\": "ç",  # One backslash represents a ç
         "O|":"Où",
         "o|":"où",
@@ -92,7 +96,8 @@ class mmfParser(object):
         "_/":"]",
         "Z3":"",
         "`":"'",
-        "\"":"'"
+        "\"":"'",
+        "##":"\n"
     }
 
     # Constant: sql schema of new MMF database
